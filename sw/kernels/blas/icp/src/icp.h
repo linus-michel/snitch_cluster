@@ -77,12 +77,12 @@ void icp_single_core(float *ref_pc, float *src_pc, int N) {
 
 
     // calculate H = sum(qi*qi'T)
-    float* H;
+    float* H[9];
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < 3; j++) {
-            H[0 + j] += ref_pc_centered[0 * N + i] * src_pc_centered[0 * N + i];
-            H[1 + j] += ref_pc_centered[1 * N + i] * src_pc_centered[1 * N + i];
-            H[2 + j] += ref_pc_centered[2 * N + i] * src_pc_centered[2 * N + i];
+            H[0 + j] += ref_pc_centered[0 * N + i] * src_pc_centered[j * N + i];
+            H[3 + j] += ref_pc_centered[1 * N + i] * src_pc_centered[j * N + i];
+            H[6 + j] += ref_pc_centered[2 * N + i] * src_pc_centered[j * N + i];
         }
     }
 
@@ -92,43 +92,105 @@ void icp_single_core(float *ref_pc, float *src_pc, int N) {
     // [3, 4, 5]    x   [1, 4, 7]   =   [3*0 + 4*1 + 5*2, 3*3 + 4*4 + 5*5, 3*6 + 4*7 + 5*8]
     // [6, 7, 8]        [2, 5, 8]       [6*0 + 7*1 + 8*2, 6*3 + 7*4 + 8*5, 6*6 + 7*7 + 8*8]
 
-    // SVD using a trigonometric approach
-    // form S=HTH first
-    // TODO: do this with gemm?
-    float* S;
+
+    // calculate S = HTH
+    float S[9];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
-            t1 = i*3;
-            t2 = j*3;
-            S[i * 3 + j] = H[t1] * H[t2] + H[t1 + 1] * H[t2 + 1] + H[t1 + 2] * H[t2 + 2];
+            S[i * 3 + j] = H[0 + i] * H[0 + j] + H[3 + i] * H[3 + j] + H[6 + i] * H[6 + j];
         }
     }
 
 
-    // S0, S1, S2
-    // S3, S4, S5
-    // S6, S7, S8
+    // perform SVD
+    // TODO: implement SVD
+
+    
 
 
-    // get coefficients for characteristic polynomial
-    float coeff_0 = S[0] * (S[4] * S[8] - S[5] * S[7]) -
-                    S[1] * (S[3] * S[8] - S[5] * S[6]) +
-                    S[2] * (S[3] * S[7] - S[4] * S[6]);     // trace of S
-    float coeff_1 = (S[4] * S[8] - S[5] * S[7]) +
-                    (S[0] * S[8] - S[2] * S[6]) +
-                    (S[0] * S[4] - S[1] * S[3]);            // sum of principal 2x2 minors
-    float coeff_2 = S[0] + S[4] + S[8];                     // trace of S
+    // calculate X=VU^T
+    float X[9];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            X[i * 3 + j] = V[0 + i] * U[0 + j] + V[3 + i] * U[3 + j] + V[6 + i] * U[6 + j];
+        }
+    }
 
-    // create depressed cubic
-    float p = coeff_1 - (coeff_2 * coeff_2) / 3;
-    float q = (coeff_1 * coeff_2) / 3 + (coeff_2 * coeff_2 * coeff_2) / 27 - coeff_0;
 
-    float theta[3];
-    float PI = 3.1415;  // TODO: maybe add more precision if needed
-    float 
+    // check if det(X) = 1
+    float X_determinant = X[0] * (X[4] * X[8] - X[5] * X[7]) -
+                          X[1] * (X[3] * X[8] - X[5] * X[6]) +
+                          X[2] * (X[3] * X[7] - X[4] * X[6]);
+
+    float rotation_matrix;
+    if (X_determinant == 1) {
+        rotation_matrix = X;
+    } else {
+        rotation_matrix = -1;   // TODO: change sign of one column to -1?
+    }
+
+
+    // calculate translation vector
+    // first apply the rotation matrix to the centroid of the source pointcloud
+    float rotated_src_pc[3];
+    for (int i = 0; i < 3; i++) {
+        rotated_src_pc[i] = rotation_matrix[0 + i] * src_pc_centered[0] +
+                            rotation_matrix[3 + i] * src_pc_centered[1] +
+                            rotation_matrix[6 + i] * src_pc_centered[2];
+    }
+
+    // then subtract rotated_src_pc from ref_pc_centered
+    float translation_vector[3];
+    translation_vector[0] = ref_pc_centered[0] - rotated_src_pc[0];
+    translation_vector[1] = ref_pc_centered[1] - rotated_src_pc[1];
+    translation_vector[2] = ref_pc_centered[2] - rotated_src_pc[2];
+
+    
+    // construct transformation matrix
+    // R = rotation matrix, T = translation vector
+    //
+    // R R R T
+    // R R R T
+    // R R R T
+    // 0 0 0 1
+    float transformation_matrix[16];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (i < 3 && j < 3) {
+                transformation_matrix[j * 4 + i] = rotation_matrix[j * 3 + i];      // R part
+            } else if (i == 3 && j < 4) {
+                transformation_matrix[j * 4 + i] = translation_vector[j];           // T part
+            } else if (i < 3 && j == 3) {
+                transformation_matrix[j * 4 + i] = 0;                               // 0 part
+            } else {
+                transformation_matrix[15] = 1;                                      // 1 part
+            }
+        }
+    }
+
+
+    // temp
+    //  trans_matrix        qi
+    //  m0  m1  m2  m3      v0          m0v0 + m1v1 + m2v2 + m3v3
+    //  m4  m5  m6  m7      v1          m4v0 + m5v1 + m6v2 + m7v3
+    //  m8  m9  m10 m11     v2          ...
+    //  m12 m13 m14 m15     v3          ...
+
+
+    // apply transformation
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < 4; j++) {
+            src_pc[i + j * N] = transformation_matrix[0 + 4 * j] * src_pc[i + 0 * N] +
+                                transformation_matrix[1 + 4 * j] * src_pc[i + 1 * N] +
+                                transformation_matrix[2 + 4 * j] * src_pc[i + 2 * N] +
+                                transformation_matrix[3 + 4 * j] * src_pc[i + 3 * N];
+        }
+    }
+
+
+    // convergence check
+    // TODO: implement convergence check
 }
-
-
 
 
 
